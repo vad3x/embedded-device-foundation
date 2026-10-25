@@ -1,0 +1,2 @@
+[alias]
+qr = ["run", "-p", "edf-pairing-tool", "--"]

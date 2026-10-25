@@ -1,0 +1,16 @@
+[package]
+name = "edf-http-ota"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+edf-core.workspace = true
+embassy-time = { workspace = true, features = ["generic-queue-8"] }
+
+[dev-dependencies]
+edf-ota = { path = "../edf-ota" }
+ed25519-dalek.workspace = true
+futures.workspace = true
+critical-section = { workspace = true, features = ["std"] }
+embassy-time = { workspace = true, features = ["std", "generic-queue-8"] }

@@ -1,0 +1,20 @@
+[package]
+name = "edf-ota"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Verified A/B OTA engine and ESP32-C6 flash adapter"
+
+[dependencies]
+edf-core = { workspace = true }
+log = { workspace = true }
+embassy-time = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+esp-hal = { workspace = true, features = ["unstable", "esp32c6"] }
+
+[dev-dependencies]
+critical-section = { workspace = true, features = ["std"] }
+embassy-time = { workspace = true, features = ["std", "generic-queue-8"] }
+futures = { workspace = true }

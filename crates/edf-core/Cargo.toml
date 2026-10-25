@@ -1,0 +1,16 @@
+[package]
+name = "edf-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generic embedded device lifecycle, diagnostics, reset services, and ports"
+
+[dependencies]
+log.workspace = true
+embassy-sync.workspace = true
+embassy-time = { workspace = true, features = ["generic-queue-8"] }
+
+[dev-dependencies]
+critical-section = { workspace = true, features = ["std"] }
+embassy-time = { workspace = true, features = ["std", "generic-queue-8"] }
+futures.workspace = true

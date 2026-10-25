@@ -1,0 +1,10 @@
+[package]
+name = "edf-pairing-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Universal Matter commissioning pairing code CLI"
+
+[dependencies]
+edf-matter = { path = "../edf-matter" }
+rs-matter = { workspace = true }

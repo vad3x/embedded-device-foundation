@@ -1,0 +1,17 @@
+[package]
+name = "edf-matter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable Matter identity, persistence and connection policy"
+
+[dependencies]
+edf-core = { workspace = true }
+rs-matter = { workspace = true }
+portable-atomic = { workspace = true, features = ["critical-section"] }
+embassy-futures = { workspace = true }
+embassy-time = { workspace = true, features = ["generic-queue-8"] }
+
+[dev-dependencies]
+critical-section = { workspace = true, features = ["std"] }
+embassy-time = { workspace = true, features = ["std", "generic-queue-8"] }

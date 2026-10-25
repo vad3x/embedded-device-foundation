@@ -1,0 +1,15 @@
+[package]
+name = "edf-http-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+edf-core.workspace = true
+embassy-time = { workspace = true, features = ["generic-queue-8"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+futures.workspace = true
+critical-section = { workspace = true, features = ["std"] }
+embassy-time = { workspace = true, features = ["std", "generic-queue-8"] }

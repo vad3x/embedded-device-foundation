@@ -1,0 +1,48 @@
+{
+  "name": "@embedded-device-foundation/dashboard-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "scripts": {
+    "typecheck": "bun --bun tsc --noEmit",
+    "typecheck:fixture": "bun --bun tsc --noEmit -p tsconfig.fixture.json",
+    "lint": "biome check .",
+    "test": "bun test",
+    "build": "bun --bun vite build && bun --bun tsc -p tsconfig.build.json",
+    "build:fixture": "bun --bun vite build --config fixture/vite.config.ts"
+  },
+  "peerDependencies": {
+    "solid-js": "1.9.17"
+  },
+  "dependencies": {
+    "clsx": "2.1.1",
+    "lucide-solid": "1.61.0",
+    "tailwind-merge": "3.7.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.2",
+    "@tailwindcss/postcss": "4.3.3",
+    "autoprefixer": "10.6.1",
+    "daisyui": "5.7.50",
+    "postcss": "8.5.31",
+    "solid-js": "1.9.17",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vite-plugin-singlefile": "2.3.4",
+    "vite-plugin-solid": "2.11.14"
+  }
+}
