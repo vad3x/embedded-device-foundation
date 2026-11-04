@@ -1,14 +1,21 @@
-import { Cpu, Globe, Home, Layers, Radio, RotateCcw, TriangleAlert } from 'lucide-solid';
+import { Box, Cpu, Globe, Home, Layers, Radio, RotateCcw, TriangleAlert } from 'lucide-solid';
 import { type Component, createEffect, createSignal, For, type JSX, Show } from 'solid-js';
 import { Badge } from './components/Badge';
 import { Card, CardBody, CardTitle } from './components/Card';
-import { endpointRows, resetPhase, subscriptionState } from './presentation';
-import type { ActiveEcosystem, EndpointInfo, FabricInfo, SubscriptionRow } from './types';
+import { endpointRows, resetPhase } from './presentation';
+import type {
+  ActiveEcosystem,
+  ClusterInfo,
+  EndpointInfo,
+  FabricInfo,
+  SubscriptionRow,
+} from './types';
 
 export interface MatterEcosystemPanelProps {
   ecosystem: ActiveEcosystem | null | undefined;
   subscriptionRows?: readonly SubscriptionRow[];
   endpointIcon?: (endpoint: EndpointInfo) => JSX.Element;
+  clusterIcon?: (cluster: ClusterInfo, endpoint: EndpointInfo) => JSX.Element;
   onResetMatter?: () => Promise<void> | void;
   isResettingMatter?: boolean;
 }
@@ -27,6 +34,7 @@ function resolveVendor(vid: number): VendorMeta {
     case 0x1349:
       return { name: 'Apple Home', role: 'Commissioner', icon: 'apple' };
     case 0x130d:
+    case 0x134b:
       return { name: 'Home Assistant', role: 'Matter Server', icon: 'home' };
     case 0x18b4:
       return { name: 'Google Home', role: 'Matter Controller', icon: 'google' };
@@ -77,12 +85,24 @@ function vendorIcon(icon: VendorIcon): JSX.Element {
   }
 }
 
-const FabricRow: Component<{ fabric: FabricInfo; isExpanded: boolean; onToggle: () => void }> = (
-  props
-) => {
+const FabricRow: Component<{
+  fabric: FabricInfo;
+  endpoints: EndpointInfo[];
+}> = (props) => {
   const meta = () => resolveVendor(props.fabric.vendor_id);
+  const subs = () => props.fabric.subscriptions ?? [];
+  const hasSubscriptions = () => subs().length > 0;
+
+  const clusterLabel = (endpointId: number, clusterHex: string) => {
+    const ep = props.endpoints.find((e) => e.id === endpointId);
+    const cl = ep?.clusters.find(
+      (c) => c.id.toLowerCase() === clusterHex.toLowerCase()
+    );
+    return cl ? `EP${endpointId} ${cl.name}` : `EP${endpointId} ${clusterHex}`;
+  };
+
   return (
-    <div class="bg-base-200/50 rounded-lg border border-base-content/10 p-3 hover:border-primary/40 transition-colors select-text">
+    <div class="bg-base-200/50 rounded-lg border border-base-content/10 p-3 hover:border-primary/40 transition-colors select-text space-y-2.5">
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-3 min-w-0">
           <div class="w-8 h-8 rounded-lg bg-base-300 flex items-center justify-center shrink-0">
@@ -101,40 +121,57 @@ const FabricRow: Component<{ fabric: FabricInfo; isExpanded: boolean; onToggle: 
           </div>
         </div>
         <div class="flex items-center gap-1.5 shrink-0">
-          <Badge variant="success" class="text-xs">
-            Connected
+          <Badge variant={hasSubscriptions() ? 'success' : 'warning'} class="text-xs">
+            {hasSubscriptions() ? 'Active' : 'Idle'}
           </Badge>
-          <button
-            type="button"
-            onClick={props.onToggle}
-            class="btn btn-ghost btn-xs text-primary font-medium"
-          >
-            {props.isExpanded ? 'Less ▲' : 'Details ▼'}
-          </button>
         </div>
       </div>
-      <Show when={props.isExpanded}>
-        <div class="mt-3 pt-2 border-t border-base-content/10 text-xs grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-base-content/70 font-mono select-text">
-          <div>
-            <span class="text-base-content/50">VID:</span> 0x
-            {props.fabric.vendor_id.toString(16).toUpperCase()}
-          </div>
-          <div>
-            <span class="text-base-content/50">Fabric Index:</span> #{props.fabric.fab_idx}
-          </div>
-          <div class="truncate">
-            <span class="text-base-content/50">Node ID:</span> {props.fabric.node_id}
-          </div>
-          <div class="truncate">
-            <span class="text-base-content/50">Fabric ID:</span> {props.fabric.fabric_id}
-          </div>
-          <Show when={props.fabric.label}>
-            <div class="sm:col-span-2 truncate">
-              <span class="text-base-content/50">Label:</span> {props.fabric.label}
-            </div>
-          </Show>
+
+      {/* Subscriptions section */}
+      <div class="flex items-center gap-1.5 flex-wrap pt-0.5">
+        <span class="text-[11px] text-base-content/50 uppercase tracking-wider font-semibold mr-1">
+          Subscriptions:
+        </span>
+        <Show
+          when={hasSubscriptions()}
+          fallback={
+            <span class="text-xs text-base-content/50 italic">
+              None (waiting for hub to subscribe)
+            </span>
+          }
+        >
+          <For each={subs()}>
+            {(sub) => (
+              <span class="badge badge-sm badge-outline gap-1.5 font-mono text-[11px] py-2 border-success/40 text-success">
+                <span class="w-1.5 h-1.5 rounded-full bg-success animate-pulse inline-block" />
+                {clusterLabel(sub.endpoint, sub.cluster)}
+              </span>
+            )}
+          </For>
+        </Show>
+      </div>
+
+      {/* Fabric details - always expanded */}
+      <div class="pt-2 border-t border-base-content/10 text-xs grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-base-content/70 font-mono select-text">
+        <div>
+          <span class="text-base-content/50">VID:</span> 0x
+          {props.fabric.vendor_id.toString(16).toUpperCase()}
         </div>
-      </Show>
+        <div>
+          <span class="text-base-content/50">Fabric Index:</span> #{props.fabric.fab_idx}
+        </div>
+        <div class="truncate">
+          <span class="text-base-content/50">Node ID:</span> {props.fabric.node_id}
+        </div>
+        <div class="truncate">
+          <span class="text-base-content/50">Fabric ID:</span> {props.fabric.fabric_id}
+        </div>
+        <Show when={props.fabric.label}>
+          <div class="sm:col-span-2 truncate">
+            <span class="text-base-content/50">Label:</span> {props.fabric.label}
+          </div>
+        </Show>
+      </div>
     </div>
   );
 };
@@ -142,7 +179,6 @@ const FabricRow: Component<{ fabric: FabricInfo; isExpanded: boolean; onToggle: 
 export const MatterEcosystemPanel: Component<MatterEcosystemPanelProps> = (props) => {
   const [confirmReset, setConfirmReset] = createSignal(false);
   const [localResetting, setLocalResetting] = createSignal(false);
-  const [expandedFabrics, setExpandedFabrics] = createSignal<Set<number>>(new Set());
   const fabrics = () => props.ecosystem?.fabrics ?? [];
   const endpoints = () => props.ecosystem?.endpoints ?? [];
   const fallbackRows = () => {
@@ -169,18 +205,11 @@ export const MatterEcosystemPanel: Component<MatterEcosystemPanelProps> = (props
   createEffect(() => {
     if (!props.onResetMatter) setConfirmReset(false);
   });
-  const toggleFabric = (index: number) => {
-    setExpandedFabrics((prev) => {
-      const next = new Set(prev);
-      if (next.has(index)) next.delete(index);
-      else next.add(index);
-      return next;
-    });
-  };
 
   return (
     <Card bordered class="w-full">
       <CardBody class="space-y-4">
+        {/* Header */}
         <div class="flex items-center justify-between mb-1">
           <CardTitle class="text-base font-bold text-base-content m-0">Matter over Wi-Fi</CardTitle>
           <div class="flex items-center gap-2">
@@ -198,67 +227,9 @@ export const MatterEcosystemPanel: Component<MatterEcosystemPanelProps> = (props
             </Badge>
           </div>
         </div>
-        <div class="overflow-x-auto my-1">
-          <Show
-            when={endpoints().length > 0}
-            fallback={
-              <table class="table table-sm">
-                <tbody>
-                  <For each={fallbackRows()}>
-                    {(row) => (
-                      <tr class="border-b border-base-content/10">
-                        <td class="text-base-content/70">
-                          {row.label}
-                          <Show when={row.endpointId !== undefined}>
-                            {' '}
-                            <span class="text-xs text-base-content/50 font-mono">
-                              (EP{row.endpointId})
-                            </span>
-                          </Show>
-                        </td>
-                        <td class="text-right">
-                          <Badge variant={row.state.variant}>{row.state.label}</Badge>
-                        </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
-            }
-          >
-            <table class="table table-sm">
-              <thead>
-                <tr class="text-[11px] text-base-content/50 border-b border-base-content/10">
-                  <th>Device Endpoint</th>
-                  <th>Cluster</th>
-                  <th class="text-right">Readiness</th>
-                </tr>
-              </thead>
-              <tbody>
-                <For each={endpoints()}>
-                  {(endpoint) => (
-                    <tr class="border-b border-base-content/10">
-                      <td class="font-medium text-base-content">
-                        {props.endpointIcon?.(endpoint)}
-                        {endpoint.name}{' '}
-                        <span class="text-xs text-base-content/50 font-mono">
-                          (EP{endpoint.id})
-                        </span>
-                      </td>
-                      <td class="text-xs text-base-content/60 font-mono">{endpoint.cluster}</td>
-                      <td class="text-right">
-                        <Badge variant={subscriptionState(endpoint.ready).variant}>
-                          {subscriptionState(endpoint.ready).label}
-                        </Badge>
-                      </td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
-          </Show>
-        </div>
-        <div class="pt-2">
+
+        {/* 1. Connected Hubs & Fabrics (At Top, Always Expanded) */}
+        <div>
           <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">
               Connected Hubs &amp; Fabrics
@@ -275,18 +246,97 @@ export const MatterEcosystemPanel: Component<MatterEcosystemPanelProps> = (props
           >
             <div class="space-y-2">
               <For each={fabrics()}>
-                {(fabric) => (
-                  <FabricRow
-                    fabric={fabric}
-                    isExpanded={expandedFabrics().has(fabric.fab_idx)}
-                    onToggle={() => toggleFabric(fabric.fab_idx)}
-                  />
+                {(fabric) => <FabricRow fabric={fabric} endpoints={endpoints()} />}
+              </For>
+            </div>
+          </Show>
+        </div>
+
+        {/* 2. Device Endpoints & Clusters (Hierarchy: Node -> Endpoints -> Clusters) */}
+        <div class="pt-2">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">
+              Device Endpoints &amp; Clusters
+            </span>
+            <Show when={endpoints().length > 0}>
+              <span class="text-xs text-base-content/50">
+                {endpoints().length} {endpoints().length === 1 ? 'Endpoint' : 'Endpoints'}
+              </span>
+            </Show>
+          </div>
+
+          <Show
+            when={endpoints().length > 0}
+            fallback={
+              <div class="overflow-x-auto my-1">
+                <table class="table table-sm">
+                  <tbody>
+                    <For each={fallbackRows()}>
+                      {(row) => (
+                        <tr class="border-b border-base-content/10">
+                          <td class="text-base-content/70">
+                            {row.label}
+                            <Show when={row.endpointId !== undefined}>
+                              {' '}
+                              <span class="text-xs text-base-content/50 font-mono">
+                                (EP{row.endpointId})
+                              </span>
+                            </Show>
+                          </td>
+                          <td class="text-right">
+                            <Badge variant={row.state.variant}>{row.state.label}</Badge>
+                          </td>
+                        </tr>
+                      )}
+                    </For>
+                  </tbody>
+                </table>
+              </div>
+            }
+          >
+            <div class="space-y-3">
+              <For each={endpoints()}>
+                {(endpoint) => (
+                  <div class="bg-base-200/30 rounded-lg border border-base-content/10 overflow-hidden">
+                    {/* Endpoint Header */}
+                    <div class="bg-base-200/60 px-3 py-2 flex items-center justify-between border-b border-base-content/10">
+                      <div class="flex items-center gap-2">
+                        {props.endpointIcon?.(endpoint) ?? <Layers class="w-4 h-4 text-primary" />}
+                        <span class="font-semibold text-xs text-base-content">
+                          EP{endpoint.id} • {endpoint.name}
+                        </span>
+                      </div>
+                      <span class="text-[11px] font-mono text-base-content/50">
+                        Type {endpoint.device_type}
+                      </span>
+                    </div>
+
+                    {/* Clusters list */}
+                    <div class="divide-y divide-base-content/5">
+                      <For each={endpoint.clusters}>
+                        {(cluster) => (
+                          <div class="px-3 py-2 flex items-center justify-between text-xs hover:bg-base-200/40 transition-colors">
+                            <div class="flex items-center gap-2 text-base-content/80 font-medium">
+                              {props.clusterIcon?.(cluster, endpoint) ?? (
+                                <Box class="w-3.5 h-3.5 text-base-content/40" />
+                              )}
+                              <span>{cluster.name}</span>
+                            </div>
+                            <span class="font-mono text-[11px] text-base-content/50">
+                              {cluster.id}
+                            </span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </div>
                 )}
               </For>
             </div>
           </Show>
         </div>
 
+        {/* Reset Matter KVS */}
         <Show when={phase() !== 'hidden'}>
           <div class="mt-2 pt-2 border-t border-base-content/10">
             <Show

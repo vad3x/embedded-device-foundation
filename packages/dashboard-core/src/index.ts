@@ -20,10 +20,12 @@ export type { MatterEcosystemPanelProps } from './MatterEcosystemPanel';
 export { MatterEcosystemPanel } from './MatterEcosystemPanel';
 export type {
   ActiveEcosystem,
+  ClusterInfo,
   EcosystemStrategy,
   EcosystemStrategyProps,
   EndpointInfo,
   FabricInfo,
+  FabricSubscription,
   SubscriptionRow,
   SystemDiagnosticsBase,
 } from './types';

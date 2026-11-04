@@ -1,18 +1,29 @@
 import type { Component } from 'solid-js';
 
+export interface FabricSubscription {
+  endpoint: number;
+  cluster: string;
+}
+
 export interface FabricInfo {
   fab_idx: number;
   vendor_id: number;
   fabric_id: string;
   node_id: string;
   label: string;
+  subscriptions?: FabricSubscription[];
+}
+
+export interface ClusterInfo {
+  id: string;
+  name: string;
 }
 
 export interface EndpointInfo {
   id: number;
   name: string;
-  cluster: string;
-  ready: boolean;
+  device_type: string;
+  clusters: ClusterInfo[];
 }
 
 export interface ActiveEcosystem {

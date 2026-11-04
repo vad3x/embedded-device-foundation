@@ -18,7 +18,14 @@ describe('shared presentation rules', () => {
 
   test('endpoint rows take precedence over configured fallback subscriptions', () => {
     const fallback = [{ label: 'Channel A', propertyKey: 'sample_a_ready' }];
-    const endpoints = [{ id: 1, name: 'Channel A', cluster: 'ExampleCluster', ready: true }];
+    const endpoints = [
+      {
+        id: 1,
+        name: 'Channel A',
+        device_type: '0x0001',
+        clusters: [{ id: '0x0001', name: 'ExampleCluster' }],
+      },
+    ];
     expect(endpointRows(endpoints, fallback, { sample_a_ready: false })).toEqual({
       kind: 'endpoints',
       rows: endpoints,

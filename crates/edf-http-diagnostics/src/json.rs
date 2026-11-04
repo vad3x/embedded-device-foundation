@@ -107,9 +107,24 @@ pub fn write_status_json<D: DiagnosticPayload, T: EcosystemType, W: Write>(
             if index != 0 {
                 out.write_char(',')?;
             }
-            write!(out, "{{\"fab_idx\":{},\"vendor_id\":{},\"fabric_id\":\"0x{:016X}\",\"node_id\":\"0x{:016X}\",\"label\":", fabric.fab_idx, fabric.vendor_id, fabric.fabric_id, fabric.node_id)?;
+            write!(
+                out,
+                "{{\"fab_idx\":{},\"vendor_id\":{},\"fabric_id\":\"0x{:016X}\",\"node_id\":\"0x{:016X}\",\"label\":",
+                fabric.fab_idx, fabric.vendor_id, fabric.fabric_id, fabric.node_id
+            )?;
             write_json_string(out, fabric.label.as_str())?;
-            out.write_char('}')?;
+            out.write_str(",\"subscriptions\":[")?;
+            for (s_idx, sub) in fabric.iter_subscriptions().enumerate() {
+                if s_idx != 0 {
+                    out.write_char(',')?;
+                }
+                write!(
+                    out,
+                    "{{\"endpoint\":{},\"cluster\":\"0x{:04X}\"}}",
+                    sub.endpoint_id, sub.cluster_id
+                )?;
+            }
+            out.write_str("]}")?;
         }
         out.write_str("],\"endpoints\":[")?;
         for (index, endpoint) in active.iter_endpoints().enumerate() {
@@ -118,9 +133,20 @@ pub fn write_status_json<D: DiagnosticPayload, T: EcosystemType, W: Write>(
             }
             write!(out, "{{\"id\":{},\"name\":", endpoint.id)?;
             write_json_string(out, endpoint.name)?;
-            out.write_str(",\"cluster\":")?;
-            write_json_string(out, endpoint.cluster)?;
-            write!(out, ",\"ready\":{}}}", endpoint.ready)?;
+            write!(
+                out,
+                ",\"device_type\":\"0x{:04X}\",\"clusters\":[",
+                endpoint.device_type
+            )?;
+            for (c_idx, cluster) in endpoint.iter_clusters().enumerate() {
+                if c_idx != 0 {
+                    out.write_char(',')?;
+                }
+                write!(out, "{{\"id\":\"0x{:04X}\",\"name\":", cluster.id)?;
+                write_json_string(out, cluster.name)?;
+                out.write_char('}')?;
+            }
+            out.write_str("]}")?;
         }
         out.write_str("]}")?;
     } else {
@@ -171,7 +197,8 @@ mod tests {
     use core::fmt::Write;
     use edf_core::domain::diagnostics::{SystemDiagnostics, WifiSsid};
     use edf_core::domain::ecosystem::{
-        EcosystemId, EcosystemStatus, EcosystemValue, EndpointInfo, FabricInfo, FabricLabel,
+        ClusterInfo, EcosystemId, EcosystemStatus, EcosystemValue, EndpointInfo, FabricInfo,
+        FabricLabel, FabricSubscription,
     };
     use edf_core::events::SystemState;
     use serde_json::Value;
@@ -211,19 +238,20 @@ mod tests {
             active_ecosystem: Some(
                 EcosystemStatus::new(EcosystemId::new("mat\\ter"), true)
                     .with_property("key\"\n", EcosystemValue::Text("va\0lue雪"))
-                    .with_fabric(FabricInfo {
-                        fab_idx: 1,
-                        vendor_id: 2,
-                        fabric_id: 0xA,
-                        node_id: 0xB,
-                        label: FabricLabel::from_str("La\"bel"),
-                    })
-                    .with_endpoint(EndpointInfo {
-                        id: 1,
-                        name: "Name\n",
-                        cluster: "Cl\\uster",
-                        ready: true,
-                    }),
+                    .with_fabric(
+                        FabricInfo::new(
+                            1,
+                            2,
+                            0xA,
+                            0xB,
+                            FabricLabel::from_str("La\"bel"),
+                        )
+                        .with_subscription(FabricSubscription::new(1, 0x003B)),
+                    )
+                    .with_endpoint(
+                        EndpointInfo::new(1, "Name\n", 0x0141)
+                            .with_cluster(ClusterInfo::new(0x003B, "Cl\\uster")),
+                    ),
             ),
             version: "v\"1",
             git_commit: "ab\\cd",
@@ -247,8 +275,16 @@ mod tests {
             );
             assert_eq!(value["active_ecosystem"]["endpoints"][0]["name"], "Name\n");
             assert_eq!(
-                value["active_ecosystem"]["endpoints"][0]["cluster"],
+                value["active_ecosystem"]["endpoints"][0]["device_type"],
+                "0x0141"
+            );
+            assert_eq!(
+                value["active_ecosystem"]["endpoints"][0]["clusters"][0]["name"],
                 "Cl\\uster"
+            );
+            assert_eq!(
+                value["active_ecosystem"]["endpoints"][0]["clusters"][0]["id"],
+                "0x003B"
             );
             assert_eq!(
                 value["active_ecosystem"]["fabrics"][0]["fabric_id"],
@@ -257,6 +293,14 @@ mod tests {
             assert_eq!(
                 value["active_ecosystem"]["fabrics"][0]["node_id"],
                 "0x000000000000000B"
+            );
+            assert_eq!(
+                value["active_ecosystem"]["fabrics"][0]["subscriptions"][0]["endpoint"],
+                1
+            );
+            assert_eq!(
+                value["active_ecosystem"]["fabrics"][0]["subscriptions"][0]["cluster"],
+                "0x003B"
             );
             assert_eq!(value["mac"], "00:01:02:AA:BB:CC");
         }
@@ -297,21 +341,20 @@ mod tests {
             status = status.with_property(key, EcosystemValue::Int(1));
         }
         for index in 0..5 {
-            status = status.with_fabric(FabricInfo {
-                fab_idx: index + 1,
-                vendor_id: 1,
-                fabric_id: 1,
-                node_id: 2,
-                label: FabricLabel::empty(),
-            });
+            status = status.with_fabric(FabricInfo::new(
+                index + 1,
+                1,
+                1,
+                2,
+                FabricLabel::empty(),
+            ));
         }
         for index in 0..4 {
-            status = status.with_endpoint(EndpointInfo {
-                id: index + 1,
-                name: "endpoint",
-                cluster: "cluster",
-                ready: true,
-            });
+            status = status.with_endpoint(EndpointInfo::new(
+                index + 1,
+                "endpoint",
+                0x000A,
+            ));
         }
         diag.active_ecosystem = Some(status);
         let mut buf = [0; 4096];

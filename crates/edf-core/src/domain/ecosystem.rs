@@ -85,12 +85,33 @@ impl FabricLabel {
     }
 }
 
+/// Maximum number of subscriptions tracked per fabric.
+pub const MAX_FABRIC_SUBSCRIPTIONS: usize = 4;
+
+/// Subscription descriptor identifying an active interaction model subscription on a fabric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FabricSubscription {
+    /// Numerical endpoint ID (e.g. 1, 2)
+    pub endpoint_id: u16,
+    /// Numerical cluster ID (e.g. 0x003B, 0x000A)
+    pub cluster_id: u32,
+}
+
+impl FabricSubscription {
+    pub const fn new(endpoint_id: u16, cluster_id: u32) -> Self {
+        Self {
+            endpoint_id,
+            cluster_id,
+        }
+    }
+}
+
 /// Telemetry snapshot for an individual connected smart home fabric / hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FabricInfo {
     /// 1-based fabric index within the device's fabric table (1..=254)
     pub fab_idx: u8,
-    /// Vendor ID of the commissioner or ecosystem (e.g. 0x1349, 0x1384, 0x130D)
+    /// Vendor ID of the commissioner or ecosystem (e.g. 0x1349, 0x1384, 0x130D, 0x134B)
     pub vendor_id: u16,
     /// 64-bit Fabric ID assigned by the operational CA
     pub fabric_id: u64,
@@ -98,22 +119,106 @@ pub struct FabricInfo {
     pub node_id: u64,
     /// Human-readable label configured by user or ecosystem (up to 32 bytes)
     pub label: FabricLabel,
+    /// Active subscriptions established by this fabric
+    pub subscriptions: [Option<FabricSubscription>; MAX_FABRIC_SUBSCRIPTIONS],
+}
+
+impl FabricInfo {
+    /// Create a new `FabricInfo` with no subscriptions.
+    pub const fn new(
+        fab_idx: u8,
+        vendor_id: u16,
+        fabric_id: u64,
+        node_id: u64,
+        label: FabricLabel,
+    ) -> Self {
+        Self {
+            fab_idx,
+            vendor_id,
+            fabric_id,
+            node_id,
+            label,
+            subscriptions: [None; MAX_FABRIC_SUBSCRIPTIONS],
+        }
+    }
+
+    /// Add an active subscription to this fabric.
+    pub fn with_subscription(mut self, sub: FabricSubscription) -> Self {
+        for slot in self.subscriptions.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(sub);
+                break;
+            }
+        }
+        self
+    }
+
+    /// Iterate over active subscriptions established by this fabric.
+    pub fn iter_subscriptions(&self) -> impl Iterator<Item = &FabricSubscription> {
+        self.subscriptions.iter().filter_map(|slot| slot.as_ref())
+    }
 }
 
 /// Maximum number of exposed smart home endpoints.
 pub const MAX_ECOSYSTEM_ENDPOINTS: usize = 4;
+
+/// Maximum number of clusters tracked per endpoint.
+pub const MAX_CLUSTERS_PER_ENDPOINT: usize = 6;
+
+/// Snapshot descriptor for a cluster exposed by an endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClusterInfo {
+    /// Numerical cluster ID (e.g. 0x003B, 0x0551, 0x000A)
+    pub id: u32,
+    /// Standard cluster name (e.g. "Switch", "Camera AV Stream Management")
+    pub name: &'static str,
+}
+
+impl ClusterInfo {
+    pub const fn new(id: u32, name: &'static str) -> Self {
+        Self { id, name }
+    }
+}
 
 /// Snapshot descriptor for an exposed smart home endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndpointInfo {
     /// Numerical endpoint ID (e.g. 1, 2)
     pub id: u16,
-    /// Human-readable name (e.g. "Thermostat", "Fan & Vane")
+    /// Human-readable name (e.g. "Audio Doorbell", "Door Lock")
     pub name: &'static str,
-    /// Standard cluster or type description (e.g. "Thermostat", "FanControl")
-    pub cluster: &'static str,
-    /// Whether the endpoint is currently primed / ready / subscribed
-    pub ready: bool,
+    /// Matter device type ID (e.g. 0x0141, 0x000A)
+    pub device_type: u32,
+    /// Clusters hosted on this endpoint
+    pub clusters: [Option<ClusterInfo>; MAX_CLUSTERS_PER_ENDPOINT],
+}
+
+impl EndpointInfo {
+    /// Create a new `EndpointInfo` with no clusters.
+    pub const fn new(id: u16, name: &'static str, device_type: u32) -> Self {
+        Self {
+            id,
+            name,
+            device_type,
+            clusters: [None; MAX_CLUSTERS_PER_ENDPOINT],
+        }
+    }
+
+    /// Add a cluster to this endpoint.
+    pub fn with_cluster(mut self, cluster: ClusterInfo) -> Self {
+        for slot in self.clusters.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(cluster);
+                break;
+            }
+        }
+        self
+    }
+
+    /// Iterate over all clusters on this endpoint.
+    pub fn iter_clusters(&self) -> impl Iterator<Item = &ClusterInfo> {
+        self.clusters.iter().filter_map(|slot| slot.as_ref())
+    }
 }
 
 /// Status and telemetry snapshot of a single active smart home ecosystem.
@@ -294,21 +399,24 @@ mod tests {
     #[test]
     fn ecosystem_status_fabric_addition_and_iteration() {
         // Arrange
-        let fab1 = FabricInfo {
-            fab_idx: 1,
-            vendor_id: 4996,
-            fabric_id: 0x1122334455667788,
-            node_id: 0x0000000000000002,
-            label: FabricLabel::from_str("Apple HomePod"),
-        };
+        let fab1 = FabricInfo::new(
+            1,
+            4996,
+            0x1122334455667788,
+            0x0000000000000002,
+            FabricLabel::from_str("Apple HomePod"),
+        )
+        .with_subscription(FabricSubscription::new(1, 0x003B))
+        .with_subscription(FabricSubscription::new(2, 0x000A));
 
-        let fab2 = FabricInfo {
-            fab_idx: 2,
-            vendor_id: 4877,
-            fabric_id: 0xAABBCCDDEEFF0011,
-            node_id: 0x0000000000000005,
-            label: FabricLabel::from_str("Home Assistant"),
-        };
+        let fab2 = FabricInfo::new(
+            2,
+            4939,
+            0xAABBCCDDEEFF0011,
+            0x0000000000000005,
+            FabricLabel::from_str("Home Assistant"),
+        )
+        .with_subscription(FabricSubscription::new(2, 0x000A));
 
         // Act
         let status = EcosystemStatus::new(EcosystemId::new("Matter"), true)
@@ -323,23 +431,23 @@ mod tests {
         assert_eq!(fabrics[1], fab2);
         assert_eq!(fabrics[0].label.as_str(), "Apple HomePod");
         assert_eq!(fabrics[1].label.as_str(), "Home Assistant");
+        let fab1_subs: Vec<_> = fabrics[0].iter_subscriptions().copied().collect();
+        assert_eq!(fab1_subs.len(), 2);
+        assert_eq!(fab1_subs[0], FabricSubscription::new(1, 0x003B));
+        assert_eq!(fab1_subs[1], FabricSubscription::new(2, 0x000A));
+        let fab2_subs: Vec<_> = fabrics[1].iter_subscriptions().copied().collect();
+        assert_eq!(fab2_subs.len(), 1);
+        assert_eq!(fab2_subs[0], FabricSubscription::new(2, 0x000A));
     }
 
     #[test]
     fn ecosystem_status_endpoint_addition_and_iteration() {
         // Arrange
-        let ep1 = EndpointInfo {
-            id: 1,
-            name: "Thermostat",
-            cluster: "Thermostat",
-            ready: true,
-        };
-        let ep2 = EndpointInfo {
-            id: 1,
-            name: "Power",
-            cluster: "OnOff",
-            ready: true,
-        };
+        let ep1 = EndpointInfo::new(1, "Audio Doorbell", 0x0141)
+            .with_cluster(ClusterInfo::new(0x003B, "Switch"))
+            .with_cluster(ClusterInfo::new(0x0551, "Camera AV Stream Management"));
+        let ep2 = EndpointInfo::new(2, "Door Lock", 0x000A)
+            .with_cluster(ClusterInfo::new(0x000A, "Door Lock"));
 
         // Act
         let status = EcosystemStatus::new(EcosystemId::new("Matter"), true)
@@ -352,6 +460,9 @@ mod tests {
         assert_eq!(endpoints.len(), 2);
         assert_eq!(endpoints[0], ep1);
         assert_eq!(endpoints[1], ep2);
+        let ep1_clusters: Vec<_> = ep1.iter_clusters().copied().collect();
+        assert_eq!(ep1_clusters.len(), 2);
+        assert_eq!(ep1_clusters[0], ClusterInfo::new(0x003B, "Switch"));
     }
 
     #[test]
@@ -361,16 +472,30 @@ mod tests {
 
         // Act - add MAX_ECOSYSTEM_FABRICS + 2
         for i in 1..=7 {
-            status = status.with_fabric(FabricInfo {
-                fab_idx: i as u8,
-                vendor_id: 0x1000 + i,
-                fabric_id: i as u64,
-                node_id: i as u64,
-                label: FabricLabel::from_str("Hub"),
-            });
+            status = status.with_fabric(FabricInfo::new(
+                i as u8,
+                0x1000 + i,
+                i as u64,
+                i as u64,
+                FabricLabel::from_str("Hub"),
+            ));
         }
 
         // Assert - only MAX_ECOSYSTEM_FABRICS (5) retained without crashing
         assert_eq!(status.iter_fabrics().count(), MAX_ECOSYSTEM_FABRICS);
+    }
+
+    #[test]
+    fn ecosystem_status_endpoint_capacity_limit() {
+        // Arrange
+        let mut status = EcosystemStatus::new(EcosystemId::new("Matter"), true);
+
+        // Act - add MAX_ECOSYSTEM_ENDPOINTS + 2
+        for i in 1..=MAX_ECOSYSTEM_ENDPOINTS + 2 {
+            status = status.with_endpoint(EndpointInfo::new(i as u16, "Cluster", 0x0141));
+        }
+
+        // Assert - only MAX_ECOSYSTEM_ENDPOINTS (4) retained without crashing
+        assert_eq!(status.iter_endpoints().count(), MAX_ECOSYSTEM_ENDPOINTS);
     }
 }
