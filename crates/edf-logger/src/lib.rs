@@ -5,6 +5,7 @@
 
 mod filter;
 mod ring;
+mod timestamp;
 
 use core::cell::RefCell;
 use core::fmt::{self, Write};
@@ -12,10 +13,11 @@ use critical_section::Mutex;
 
 pub use filter::{DEFAULT_SUPPRESSED_DEBUG_EXACT, DEFAULT_SUPPRESSED_DEBUG_PREFIXES};
 pub use ring::LogRingBuffer;
+pub use timestamp::LogTimestamp;
 
 /// A no-allocation logger with one retained byte ring per instance.
 pub struct UptimeLogger<const N: usize> {
-    clock_ms: fn() -> u64,
+    timestamp_fn: fn() -> LogTimestamp,
     output: for<'a> fn(log::Level, fmt::Arguments<'a>),
     suppressed_debug_exact: &'static [&'static str],
     suppressed_debug_prefixes: &'static [&'static str],
@@ -28,13 +30,13 @@ impl<const N: usize> UptimeLogger<N> {
     /// `output` receives a complete timestamped record without a line ending.
     /// The output callback owns any transport-specific line ending or decoration.
     pub const fn new(
-        clock_ms: fn() -> u64,
+        timestamp_fn: fn() -> LogTimestamp,
         output: for<'a> fn(log::Level, fmt::Arguments<'a>),
         suppressed_debug_exact: &'static [&'static str],
         suppressed_debug_prefixes: &'static [&'static str],
     ) -> Self {
         Self {
-            clock_ms,
+            timestamp_fn,
             output,
             suppressed_debug_exact,
             suppressed_debug_prefixes,
@@ -69,18 +71,14 @@ impl<const N: usize> log::Log for UptimeLogger<N> {
             return;
         }
 
-        let ms = (self.clock_ms)();
-        let total_secs = ms / 1000;
-        let hours = total_secs / 3600;
-        let minutes = (total_secs % 3600) / 60;
-        let seconds = total_secs % 60;
-        let millis = ms % 1000;
+        let timestamp = (self.timestamp_fn)();
 
         critical_section::with(|cs| {
             let mut ring = self.ring.borrow(cs).borrow_mut();
             let _ = writeln!(
                 &mut *ring,
-                "{hours:02}:{minutes:02}:{seconds:02}.{millis:03} {:<5} {} - {}",
+                "{} {:<5} {} - {}",
+                timestamp,
                 record.level(),
                 record.target(),
                 record.args(),
@@ -89,7 +87,8 @@ impl<const N: usize> log::Log for UptimeLogger<N> {
         (self.output)(
             record.level(),
             format_args!(
-                "{hours:02}:{minutes:02}:{seconds:02}.{millis:03} {:<5} {} - {}",
+                "{} {:<5} {} - {}",
+                timestamp,
                 record.level(),
                 record.target(),
                 record.args(),
@@ -116,8 +115,8 @@ mod tests {
     static TEST_SERIAL: Mutex<()> = Mutex::new(());
     static REGISTERED_LOGGER: UptimeLogger<8> = UptimeLogger::new(clock, output, &[], &[]);
 
-    fn clock() -> u64 {
-        3_723_004
+    fn clock() -> LogTimestamp {
+        LogTimestamp::Uptime { ms: 3_723_004 }
     }
 
     fn output(_level: Level, args: core::fmt::Arguments<'_>) {
