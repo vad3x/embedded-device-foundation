@@ -4,17 +4,10 @@
 //! bytes through `OtaWriter`, verifying Ed25519 signatures, and committing new bootloader
 //! entries with `OtaBootloader`.
 
-#[cfg(not(target_arch = "riscv32"))]
-use crate::bootloader::MemOtaFlash;
-#[cfg(target_arch = "riscv32")]
-use crate::bootloader::{BootloaderError, EspOtaFlash};
 use crate::bootloader::{DefaultFlash, OtaBootloader, OtaFlashStorage};
-#[cfg(target_arch = "riscv32")]
-use crate::writer::EspTargetFlash;
-#[cfg(not(target_arch = "riscv32"))]
-use crate::writer::MemTargetFlash;
 use crate::writer::{
-    DefaultTargetFlash, OtaError, OtaTargetFlash, OtaWriter, MAX_APP_SLOT_SIZE, OTA_HEADER_LEN,
+    DefaultTargetFlash, OtaError, OtaImageProfile, OtaTargetFlash, OtaWriter, MAX_APP_SLOT_SIZE,
+    OTA_HEADER_LEN,
 };
 
 use edf_core::ports::ota::{OtaDriverError, OtaFlashDriver, OtaStream};
@@ -29,58 +22,87 @@ use log::{info, warn};
 /// and committing firmware updates into inactive application partitions.
 pub struct FlashOtaDriver<F = DefaultFlash, TF = DefaultTargetFlash> {
     public_key: [u8; 32],
+    image_profile: OtaImageProfile,
     check_esp_magic: bool,
     bootloader: OtaBootloader<F>,
     target_flash: TF,
     reboot_required: bool,
 }
 
-#[cfg(not(target_arch = "riscv32"))]
-impl FlashOtaDriver<MemOtaFlash, MemTargetFlash> {
-    /// Construct a new `FlashOtaDriver` with default in-memory flash for host testing.
-    pub fn new(public_key: [u8; 32]) -> Self {
-        Self {
-            public_key,
-            check_esp_magic: true,
-            bootloader: OtaBootloader::new(MemOtaFlash::blank())
-                .expect("Failed to initialize MemOtaFlash"),
-            target_flash: MemTargetFlash::new(),
-            reboot_required: false,
+#[cfg(not(target_os = "none"))]
+mod host {
+    use super::{FlashOtaDriver, OtaBootloader, OtaImageProfile};
+    use crate::bootloader::MemOtaFlash;
+    use crate::writer::MemTargetFlash;
+
+    impl FlashOtaDriver<MemOtaFlash, MemTargetFlash> {
+        /// Construct a new `FlashOtaDriver` with default in-memory flash for host testing.
+        pub fn new(public_key: [u8; 32]) -> Self {
+            Self {
+                public_key,
+                image_profile: OtaImageProfile::ESP32_C6,
+                check_esp_magic: true,
+                bootloader: OtaBootloader::new(MemOtaFlash::blank())
+                    .expect("Failed to initialize MemOtaFlash"),
+                target_flash: MemTargetFlash::new(),
+                reboot_required: false,
+            }
         }
     }
 }
 
-#[cfg(target_arch = "riscv32")]
-impl FlashOtaDriver<EspOtaFlash, EspTargetFlash> {
-    /// Construct a new `FlashOtaDriver` with the target hardware ESP32-C6 flash driver.
-    pub fn new(public_key: [u8; 32]) -> Self {
-        let bootloader =
-            OtaBootloader::load().expect("Failed to load OTA bootloader from SPI flash");
-        Self {
-            public_key,
-            check_esp_magic: true,
-            bootloader,
-            target_flash: EspTargetFlash,
-            reboot_required: false,
+#[cfg(target_os = "none")]
+mod target {
+    use super::{FlashOtaDriver, OtaBootloader, OtaImageProfile};
+    use crate::bootloader::{BootloaderError, EspOtaFlash};
+    use crate::writer::EspTargetFlash;
+
+    impl FlashOtaDriver<EspOtaFlash, EspTargetFlash> {
+        /// Construct a new `FlashOtaDriver` with the target hardware ESP32 flash driver.
+        pub fn new(public_key: [u8; 32]) -> Self {
+            Self::new_with_profile(public_key, OtaImageProfile::ESP32_C6)
         }
-    }
 
-    /// Attempt to construct a new `FlashOtaDriver`, returning an error if bootloader loading fails.
-    pub fn try_new(public_key: [u8; 32]) -> Result<Self, BootloaderError> {
-        let bootloader = OtaBootloader::load()?;
-        Ok(Self {
-            public_key,
-            check_esp_magic: true,
-            bootloader,
-            target_flash: EspTargetFlash,
-            reboot_required: false,
-        })
-    }
+        /// Construct a target driver for the selected image chip and partition geometry.
+        pub fn new_with_profile(public_key: [u8; 32], image_profile: OtaImageProfile) -> Self {
+            let bootloader =
+                OtaBootloader::load().expect("Failed to load OTA bootloader from SPI flash");
+            Self {
+                public_key,
+                image_profile,
+                check_esp_magic: true,
+                bootloader,
+                target_flash: EspTargetFlash,
+                reboot_required: false,
+            }
+        }
 
-    /// Reload the bootloader state from hardware flash.
-    pub fn reload_bootloader(&mut self) -> Result<(), BootloaderError> {
-        self.bootloader = OtaBootloader::load()?;
-        Ok(())
+        /// Attempt to construct a new `FlashOtaDriver`, returning an error if bootloader loading fails.
+        pub fn try_new(public_key: [u8; 32]) -> Result<Self, BootloaderError> {
+            Self::try_new_with_profile(public_key, OtaImageProfile::ESP32_C6)
+        }
+
+        /// Attempt to construct a target driver with selected chip/partition settings.
+        pub fn try_new_with_profile(
+            public_key: [u8; 32],
+            image_profile: OtaImageProfile,
+        ) -> Result<Self, BootloaderError> {
+            let bootloader = OtaBootloader::load()?;
+            Ok(Self {
+                public_key,
+                image_profile,
+                check_esp_magic: true,
+                bootloader,
+                target_flash: EspTargetFlash,
+                reboot_required: false,
+            })
+        }
+
+        /// Reload the bootloader state from hardware flash.
+        pub fn reload_bootloader(&mut self) -> Result<(), BootloaderError> {
+            self.bootloader = OtaBootloader::load()?;
+            Ok(())
+        }
     }
 }
 
@@ -93,6 +115,7 @@ impl<F: OtaFlashStorage, TF: OtaTargetFlash> FlashOtaDriver<F, TF> {
     ) -> Self {
         Self {
             public_key,
+            image_profile: OtaImageProfile::ESP32_C6,
             check_esp_magic: true,
             bootloader,
             target_flash,
@@ -137,10 +160,11 @@ impl<F: OtaFlashStorage, TF: OtaTargetFlash> OtaFlashDriver for FlashOtaDriver<F
             return Err(OtaDriverError::RebootRequired);
         }
 
-        if !(OTA_HEADER_LEN..=MAX_OTA_PAYLOAD_SIZE).contains(&content_length) {
+        let max_ota_payload_size = OTA_HEADER_LEN + self.image_profile.slot_size;
+        if !(OTA_HEADER_LEN..=max_ota_payload_size).contains(&content_length) {
             warn!(
                 "FlashOtaDriver: invalid content length {} (expected {}..={})",
-                content_length, OTA_HEADER_LEN, MAX_OTA_PAYLOAD_SIZE
+                content_length, OTA_HEADER_LEN, max_ota_payload_size
             );
             return Err(OtaDriverError::InvalidHeader);
         }
@@ -152,8 +176,13 @@ impl<F: OtaFlashStorage, TF: OtaTargetFlash> OtaFlashDriver for FlashOtaDriver<F
             target_slot, next_seq, content_length
         );
 
-        let mut writer = OtaWriter::new(&mut self.target_flash, target_slot, self.public_key)
-            .with_esp_magic_check(self.check_esp_magic);
+        let mut writer = OtaWriter::new_with_profile(
+            &mut self.target_flash,
+            target_slot,
+            self.public_key,
+            self.image_profile,
+        )
+        .with_esp_magic_check(self.check_esp_magic);
 
         let mut chunk_buf = [0u8; CHUNK_BUF_SIZE];
         let mut total_received = 0;

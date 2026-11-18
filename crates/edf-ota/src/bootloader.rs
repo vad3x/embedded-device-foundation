@@ -6,8 +6,6 @@
 //! resolution, and fail-safe rollback logic across `ota_0` and `ota_1` slots.
 
 use log::{debug, info};
-#[cfg(target_arch = "riscv32")]
-use log::warn;
 
 // ============================================================================
 // Public Structs & Implementation
@@ -151,14 +149,6 @@ impl<F: OtaFlashStorage> OtaBootloader<F> {
     }
 }
 
-#[cfg(target_arch = "riscv32")]
-impl OtaBootloader<EspOtaFlash> {
-    /// Load bootloader state using the ESP32-C6 ROM SPI flash driver.
-    pub fn load() -> Result<Self, BootloaderError> {
-        Self::new(EspOtaFlash)
-    }
-}
-
 // ============================================================================
 // Public Functions
 // ============================================================================
@@ -283,19 +273,6 @@ pub fn write_ota_entry(buffer: &mut [u8], seq: u32, state: OtaState) {
     if buffer.len() >= EspOtaSelectEntry::SIZE {
         buffer[..EspOtaSelectEntry::SIZE].copy_from_slice(&bytes);
     }
-}
-
-/// Standalone convenience helper called on startup to confirm running firmware health.
-#[cfg(target_arch = "riscv32")]
-pub fn mark_running_slot_valid() -> Result<(), BootloaderError> {
-    let mut bootloader = OtaBootloader::load()?;
-    bootloader.mark_valid()
-}
-
-/// Standalone convenience helper on host targets (no-op success).
-#[cfg(not(target_arch = "riscv32"))]
-pub fn mark_running_slot_valid() -> Result<(), BootloaderError> {
-    Ok(())
 }
 
 // ============================================================================
@@ -580,123 +557,156 @@ pub const OTA_DATA_SECTOR_1_OFFSET: u32 = OTA_DATA_OFFSET + OTA_DATA_SECTOR_SIZE
 // Target Hardware SPI Flash Implementation (RISC-V only)
 // ============================================================================
 
-#[cfg(target_arch = "riscv32")]
-pub type DefaultFlash = EspOtaFlash;
+#[cfg(not(target_os = "none"))]
+pub use host::{mark_running_slot_valid, DefaultFlash};
+#[cfg(target_os = "none")]
+pub use target::{mark_running_slot_valid, DefaultFlash, EspOtaFlash, EspOtaFlashError};
 
-#[cfg(not(target_arch = "riscv32"))]
-pub type DefaultFlash = MemOtaFlash;
+#[cfg(not(target_os = "none"))]
+mod host {
+    use super::{BootloaderError, MemOtaFlash};
 
-#[cfg(target_arch = "riscv32")]
-pub struct EspOtaFlash;
+    pub type DefaultFlash = MemOtaFlash;
 
-#[cfg(target_arch = "riscv32")]
-#[derive(Debug, Clone, Copy)]
-pub enum EspOtaFlashError {
-    Rom(i32),
-    InvalidSector,
-}
-
-#[cfg(target_arch = "riscv32")]
-impl OtaFlashStorage for EspOtaFlash {
-    type Error = EspOtaFlashError;
-
-    fn read_otadata(
-        &mut self,
-        sector0: &mut [u8; OTA_DATA_ENTRY_SIZE],
-        sector1: &mut [u8; OTA_DATA_ENTRY_SIZE],
-    ) -> Result<(), Self::Error> {
-        let mut buf0 = [0u32; OTA_DATA_ENTRY_SIZE / 4];
-        let ret0 = unsafe {
-            esp_hal::rom::spiflash::esp_rom_spiflash_read(
-                OTA_DATA_SECTOR_0_OFFSET,
-                buf0.as_mut_ptr(),
-                OTA_DATA_ENTRY_SIZE as u32,
-            )
-        };
-        if ret0 != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            return Err(EspOtaFlashError::Rom(ret0));
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buf0.as_ptr() as *const u8,
-                sector0.as_mut_ptr(),
-                OTA_DATA_ENTRY_SIZE,
-            );
-        }
-
-        let mut buf1 = [0u32; OTA_DATA_ENTRY_SIZE / 4];
-        let ret1 = unsafe {
-            esp_hal::rom::spiflash::esp_rom_spiflash_read(
-                OTA_DATA_SECTOR_1_OFFSET,
-                buf1.as_mut_ptr(),
-                OTA_DATA_ENTRY_SIZE as u32,
-            )
-        };
-        if ret1 != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            return Err(EspOtaFlashError::Rom(ret1));
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buf1.as_ptr() as *const u8,
-                sector1.as_mut_ptr(),
-                OTA_DATA_ENTRY_SIZE,
-            );
-        }
-
+    /// Standalone convenience helper on host targets (no-op success).
+    pub fn mark_running_slot_valid() -> Result<(), BootloaderError> {
         Ok(())
     }
+}
 
-    fn write_otadata_sector(
-        &mut self,
-        sector_index: usize,
-        data: &[u8; OTA_DATA_ENTRY_SIZE],
-    ) -> Result<(), Self::Error> {
-        let (offset, sector_num) = match sector_index {
-            0 => (
-                OTA_DATA_SECTOR_0_OFFSET,
-                OTA_DATA_SECTOR_0_OFFSET / OTA_DATA_SECTOR_SIZE as u32,
-            ),
-            1 => (
-                OTA_DATA_SECTOR_1_OFFSET,
-                OTA_DATA_SECTOR_1_OFFSET / OTA_DATA_SECTOR_SIZE as u32,
-            ),
-            _ => return Err(EspOtaFlashError::InvalidSector),
-        };
+#[cfg(target_os = "none")]
+mod target {
+    use log::warn;
 
-        let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_unlock() };
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            warn!("Flash unlock failed: {}", ret);
-            return Err(EspOtaFlashError::Rom(ret));
+    use super::{
+        BootloaderError, OtaBootloader, OtaFlashStorage, OTA_DATA_ENTRY_SIZE,
+        OTA_DATA_SECTOR_0_OFFSET, OTA_DATA_SECTOR_1_OFFSET, OTA_DATA_SECTOR_SIZE,
+    };
+
+    pub type DefaultFlash = EspOtaFlash;
+
+    pub struct EspOtaFlash;
+
+    #[derive(Debug, Clone, Copy)]
+    pub enum EspOtaFlashError {
+        Rom(i32),
+        InvalidSector,
+    }
+
+    impl OtaBootloader<EspOtaFlash> {
+        /// Load bootloader state using the ESP32 ROM SPI flash driver.
+        pub fn load() -> Result<Self, BootloaderError> {
+            Self::new(EspOtaFlash)
+        }
+    }
+
+    /// Standalone convenience helper called on startup to confirm running firmware health.
+    pub fn mark_running_slot_valid() -> Result<(), BootloaderError> {
+        let mut bootloader = OtaBootloader::load()?;
+        bootloader.mark_valid()
+    }
+
+    impl OtaFlashStorage for EspOtaFlash {
+        type Error = EspOtaFlashError;
+
+        fn read_otadata(
+            &mut self,
+            sector0: &mut [u8; OTA_DATA_ENTRY_SIZE],
+            sector1: &mut [u8; OTA_DATA_ENTRY_SIZE],
+        ) -> Result<(), Self::Error> {
+            let mut buf0 = [0u32; OTA_DATA_ENTRY_SIZE / 4];
+            let ret0 = unsafe {
+                esp_hal::rom::spiflash::esp_rom_spiflash_read(
+                    OTA_DATA_SECTOR_0_OFFSET,
+                    buf0.as_mut_ptr(),
+                    OTA_DATA_ENTRY_SIZE as u32,
+                )
+            };
+            if ret0 != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                return Err(EspOtaFlashError::Rom(ret0));
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buf0.as_ptr() as *const u8,
+                    sector0.as_mut_ptr(),
+                    OTA_DATA_ENTRY_SIZE,
+                );
+            }
+
+            let mut buf1 = [0u32; OTA_DATA_ENTRY_SIZE / 4];
+            let ret1 = unsafe {
+                esp_hal::rom::spiflash::esp_rom_spiflash_read(
+                    OTA_DATA_SECTOR_1_OFFSET,
+                    buf1.as_mut_ptr(),
+                    OTA_DATA_ENTRY_SIZE as u32,
+                )
+            };
+            if ret1 != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                return Err(EspOtaFlashError::Rom(ret1));
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buf1.as_ptr() as *const u8,
+                    sector1.as_mut_ptr(),
+                    OTA_DATA_ENTRY_SIZE,
+                );
+            }
+
+            Ok(())
         }
 
-        let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_erase_sector(sector_num) };
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            warn!("Flash erase sector {} failed: {}", sector_num, ret);
-            return Err(EspOtaFlashError::Rom(ret));
-        }
+        fn write_otadata_sector(
+            &mut self,
+            sector_index: usize,
+            data: &[u8; OTA_DATA_ENTRY_SIZE],
+        ) -> Result<(), Self::Error> {
+            let (offset, sector_num) = match sector_index {
+                0 => (
+                    OTA_DATA_SECTOR_0_OFFSET,
+                    OTA_DATA_SECTOR_0_OFFSET / OTA_DATA_SECTOR_SIZE as u32,
+                ),
+                1 => (
+                    OTA_DATA_SECTOR_1_OFFSET,
+                    OTA_DATA_SECTOR_1_OFFSET / OTA_DATA_SECTOR_SIZE as u32,
+                ),
+                _ => return Err(EspOtaFlashError::InvalidSector),
+            };
 
-        let mut aligned = [0u32; OTA_DATA_ENTRY_SIZE / 4];
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                aligned.as_mut_ptr() as *mut u8,
-                OTA_DATA_ENTRY_SIZE,
-            );
-        }
+            let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_unlock() };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                warn!("Flash unlock failed: {}", ret);
+                return Err(EspOtaFlashError::Rom(ret));
+            }
 
-        let ret = unsafe {
-            esp_hal::rom::spiflash::esp_rom_spiflash_write(
-                offset,
-                aligned.as_ptr(),
-                OTA_DATA_ENTRY_SIZE as u32,
-            )
-        };
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            warn!("Flash write at 0x{:x} failed: {}", offset, ret);
-            return Err(EspOtaFlashError::Rom(ret));
-        }
+            let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_erase_sector(sector_num) };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                warn!("Flash erase sector {} failed: {}", sector_num, ret);
+                return Err(EspOtaFlashError::Rom(ret));
+            }
 
-        Ok(())
+            let mut aligned = [0u32; OTA_DATA_ENTRY_SIZE / 4];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    aligned.as_mut_ptr() as *mut u8,
+                    OTA_DATA_ENTRY_SIZE,
+                );
+            }
+
+            let ret = unsafe {
+                esp_hal::rom::spiflash::esp_rom_spiflash_write(
+                    offset,
+                    aligned.as_ptr(),
+                    OTA_DATA_ENTRY_SIZE as u32,
+                )
+            };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                warn!("Flash write at 0x{:x} failed: {}", offset, ret);
+                return Err(EspOtaFlashError::Rom(ret));
+            }
+
+            Ok(())
+        }
     }
 }
 

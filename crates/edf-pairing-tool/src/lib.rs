@@ -1,7 +1,6 @@
 //! Host-side Matter commissioning credentials derived from the shared device identity.
 
 use edf_matter::identity::{derive_device_identity, IdentityError, IdentityParams};
-use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::pairing::qr::{no_optional_data, CommFlowType, QrPayload};
 use rs_matter::pairing::DiscoveryCapabilities;
 
@@ -75,17 +74,13 @@ pub fn generate(options: PairingOptions<'_>) -> Result<PairingData, PairingError
     let manual_code_long = comm_data
         .compute_pretty_pairing_code_long(options.vid, options.pid)
         .to_string();
-    let basic_info = BasicInfoConfig {
-        vid: options.vid,
-        pid: options.pid,
-        serial_no: identity.serial_str(),
-        ..BasicInfoConfig::new()
-    };
-    let payload = QrPayload::new_from_basic_info(
+    let payload = QrPayload::new(
         DiscoveryCapabilities::BLE,
         CommFlowType::Standard,
         comm_data,
-        &basic_info,
+        options.vid,
+        options.pid,
+        identity.serial_str(),
         no_optional_data,
     );
     let mut qr_buf = [0; 128];

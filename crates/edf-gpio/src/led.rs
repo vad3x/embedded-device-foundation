@@ -12,11 +12,15 @@ use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
-#[cfg(target_arch = "riscv32")]
-use esp_hal::gpio::{Level, Output, OutputConfig};
-use log::info;
 
 use crate::config;
+
+#[cfg(not(target_os = "none"))]
+use host::LedPin;
+#[cfg(not(target_os = "none"))]
+pub use host::MockLedPin;
+#[cfg(target_os = "none")]
+use target::LedPin;
 
 // ============================================================================
 // Public Structs & Implementation
@@ -135,48 +139,16 @@ pub trait HoldFeedback {
 /// In active-low wiring, the LED is ON when the output is LOW, and OFF when HIGH.
 /// Synchronous trigger methods queue commands to the background `run` loop.
 pub struct GpioLedDriver<P: LedProfile = DefaultLedProfile> {
-    #[cfg(target_arch = "riscv32")]
-    pin: RefCell<Output<'static>>,
-    #[cfg(not(target_arch = "riscv32"))]
-    pin: RefCell<MockLedPin>,
+    pin: RefCell<LedPin>,
     signal: Signal<CriticalSectionRawMutex, IndicatorCommand>,
     current_state: RefCell<Option<SystemState>>,
     _profile: PhantomData<P>,
 }
 
-impl GpioLedDriver<DefaultLedProfile> {
-    /// Create a new LED driver with the target hardware output pin on RISC-V.
-    #[cfg(target_arch = "riscv32")]
-    pub fn new(pin: impl esp_hal::gpio::OutputPin + 'static) -> Self {
-        Self::with_profile(pin)
-    }
-
-    /// Create a new LED driver with simulated pin for host testing.
-    #[cfg(not(target_arch = "riscv32"))]
-    pub fn new() -> Self {
-        Self::with_profile()
-    }
-}
-
 impl<P: LedProfile> GpioLedDriver<P> {
-    /// Create a new LED driver using the profile's [`LedTimings`].
-    #[cfg(target_arch = "riscv32")]
-    pub fn with_profile(pin: impl esp_hal::gpio::OutputPin + 'static) -> Self {
-        info!("GpioLedDriver created (active-low)");
+    fn from_pin(pin: LedPin) -> Self {
         Self {
-            pin: RefCell::new(Output::new(pin, Level::High, OutputConfig::default())), // Start OFF (High)
-            signal: Signal::new(),
-            current_state: RefCell::new(None),
-            _profile: PhantomData,
-        }
-    }
-
-    /// Create a new LED driver using the profile's [`LedTimings`] for host testing.
-    #[cfg(not(target_arch = "riscv32"))]
-    pub fn with_profile() -> Self {
-        info!("GpioLedDriver created (host mock active-low)");
-        Self {
-            pin: RefCell::new(MockLedPin::new()), // Start OFF (High)
+            pin: RefCell::new(pin),
             signal: Signal::new(),
             current_state: RefCell::new(None),
             _profile: PhantomData,
@@ -238,14 +210,7 @@ impl<P: LedProfile> GpioLedDriver<P> {
 
     /// Query whether the LED is currently powered ON (pin is LOW).
     pub fn is_on(&self) -> bool {
-        #[cfg(target_arch = "riscv32")]
-        {
-            self.pin.borrow().is_set_low()
-        }
-        #[cfg(not(target_arch = "riscv32"))]
-        {
-            self.pin.borrow().is_set_low()
-        }
+        self.pin.borrow().is_set_low()
     }
 
     /// Query the last observed system lifecycle state.
@@ -510,13 +475,6 @@ impl<P: LedProfile> HoldFeedback for GpioLedDriver<P> {
     }
 }
 
-#[cfg(not(target_arch = "riscv32"))]
-impl Default for GpioLedDriver<DefaultLedProfile> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ============================================================================
 // Internal Commands & Supporting Types
 // ============================================================================
@@ -547,37 +505,90 @@ enum IndicatorCommand {
     },
 }
 
-/// Simulated output pin for host unit tests.
-#[cfg(not(target_arch = "riscv32"))]
-#[derive(Debug, Default)]
-pub struct MockLedPin {
-    pub is_low: bool,
+#[cfg(target_os = "none")]
+mod target {
+    use esp_hal::gpio::{Level, Output, OutputConfig, OutputPin};
+    use log::info;
+
+    use super::{DefaultLedProfile, GpioLedDriver, LedProfile};
+
+    pub type LedPin = Output<'static>;
+
+    impl GpioLedDriver<DefaultLedProfile> {
+        /// Create a new LED driver with the target hardware output pin.
+        pub fn new(pin: impl OutputPin + 'static) -> Self {
+            Self::with_profile(pin)
+        }
+    }
+
+    impl<P: LedProfile> GpioLedDriver<P> {
+        /// Create a new LED driver using the profile's [`LedTimings`].
+        pub fn with_profile(pin: impl OutputPin + 'static) -> Self {
+            info!("GpioLedDriver created (active-low)");
+            Self::from_pin(Output::new(pin, Level::High, OutputConfig::default()))
+        }
+    }
 }
 
-#[cfg(not(target_arch = "riscv32"))]
-impl MockLedPin {
-    pub fn new() -> Self {
-        Self { is_low: false } // Starts high (OFF for active-low)
+#[cfg(not(target_os = "none"))]
+mod host {
+    use log::info;
+
+    use super::{DefaultLedProfile, GpioLedDriver, LedProfile};
+
+    pub type LedPin = MockLedPin;
+
+    impl GpioLedDriver<DefaultLedProfile> {
+        /// Create a new LED driver with simulated pin for host testing.
+        pub fn new() -> Self {
+            Self::with_profile()
+        }
     }
 
-    pub fn set_low(&mut self) {
-        self.is_low = true;
+    impl Default for GpioLedDriver<DefaultLedProfile> {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
-    pub fn set_high(&mut self) {
-        self.is_low = false;
+    impl<P: LedProfile> GpioLedDriver<P> {
+        /// Create a new LED driver using the profile's [`LedTimings`] for host testing.
+        pub fn with_profile() -> Self {
+            info!("GpioLedDriver created (host mock active-low)");
+            Self::from_pin(MockLedPin::new())
+        }
     }
 
-    pub fn is_low(&self) -> bool {
-        self.is_low
+    /// Simulated output pin for host unit tests.
+    #[derive(Debug, Default)]
+    pub struct MockLedPin {
+        pub is_low: bool,
     }
 
-    pub fn is_set_low(&self) -> bool {
-        self.is_low
-    }
+    impl MockLedPin {
+        pub fn new() -> Self {
+            Self { is_low: false } // Starts high (OFF for active-low)
+        }
 
-    pub fn is_high(&self) -> bool {
-        !self.is_low
+        pub fn set_low(&mut self) {
+            self.is_low = true;
+        }
+
+        pub fn set_high(&mut self) {
+            self.is_low = false;
+        }
+
+        pub fn is_low(&self) -> bool {
+            self.is_low
+        }
+
+        pub fn is_set_low(&self) -> bool {
+            self.is_low
+        }
+
+        pub fn is_high(&self) -> bool {
+            !self.is_low
+        }
     }
 }
 

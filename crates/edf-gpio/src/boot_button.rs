@@ -5,12 +5,17 @@
 use edf_core::domain::classify_reset_hold;
 use edf_core::ports::{ResetScope, ResetTriggerDriver};
 use embassy_time::{Duration, Instant, Timer};
-#[cfg(target_arch = "riscv32")]
-use esp_hal::gpio::{Input, InputConfig, Pull};
 use log::info;
 
 use crate::config;
 use crate::led::HoldFeedback;
+
+#[cfg(not(target_os = "none"))]
+use host::ButtonPin;
+#[cfg(not(target_os = "none"))]
+pub use host::MockButtonPin;
+#[cfg(target_os = "none")]
+use target::ButtonPin;
 
 // ============================================================================
 // Public Structs & Implementation
@@ -37,10 +42,7 @@ impl GpioBootButtonDriver {
 /// Configuration options for the GPIO BOOT button reset driver.
 pub struct GpioBootButtonConfig {
     /// Active-low input pin with internal pull-up.
-    #[cfg(target_arch = "riscv32")]
-    pub pin: Input<'static>,
-    #[cfg(not(target_arch = "riscv32"))]
-    pub pin: MockButtonPin,
+    pub pin: ButtonPin,
 
     /// Optional LED indicator for live visual hold feedback.
     pub indicator: Option<&'static dyn HoldFeedback>,
@@ -59,24 +61,9 @@ pub struct GpioBootButtonConfig {
 }
 
 impl GpioBootButtonConfig {
-    /// Create default configuration for target hardware on RISC-V.
-    #[cfg(target_arch = "riscv32")]
-    pub fn new(pin: impl esp_hal::gpio::InputPin + 'static) -> Self {
+    fn with_pin(pin: ButtonPin) -> Self {
         Self {
-            pin: Input::new(pin, InputConfig::default().with_pull(Pull::Up)),
-            indicator: None,
-            ecosystem_hold_ms: config::ECOSYSTEM_RESET_HOLD_MS,
-            factory_hold_ms: config::FACTORY_RESET_HOLD_MS,
-            debounce_ms: config::BUTTON_DEBOUNCE_MS,
-            poll_interval_ms: config::BUTTON_POLL_INTERVAL_MS,
-        }
-    }
-
-    /// Create default configuration for host testing with simulated pin.
-    #[cfg(not(target_arch = "riscv32"))]
-    pub fn new() -> Self {
-        Self {
-            pin: MockButtonPin::new(),
+            pin,
             indicator: None,
             ecosystem_hold_ms: config::ECOSYSTEM_RESET_HOLD_MS,
             factory_hold_ms: config::FACTORY_RESET_HOLD_MS,
@@ -103,13 +90,6 @@ impl GpioBootButtonConfig {
         self.debounce_ms = debounce_ms;
         self.poll_interval_ms = poll_interval_ms;
         self
-    }
-}
-
-#[cfg(not(target_arch = "riscv32"))]
-impl Default for GpioBootButtonConfig {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -191,19 +171,54 @@ impl ResetTriggerDriver for GpioBootButtonDriver {
     }
 }
 
+#[cfg(target_os = "none")]
+mod target {
+    use esp_hal::gpio::{Input, InputConfig, InputPin, Pull};
+
+    use super::GpioBootButtonConfig;
+
+    pub type ButtonPin = Input<'static>;
+
+    impl GpioBootButtonConfig {
+        /// Create default configuration for target hardware.
+        pub fn new(pin: impl InputPin + 'static) -> Self {
+            Self::with_pin(Input::new(pin, InputConfig::default().with_pull(Pull::Up)))
+        }
+    }
+}
+
 // ============================================================================
 // Host Simulated Pin
 // ============================================================================
 
-/// Simulated input pin for host unit tests.
-#[cfg(not(target_arch = "riscv32"))]
-#[derive(Debug, Default)]
-pub struct MockButtonPin {
-    pressed: core::cell::Cell<bool>,
-}
+#[cfg(not(target_os = "none"))]
+mod host {
+    use embassy_time::{Duration, Timer};
 
-#[cfg(not(target_arch = "riscv32"))]
-impl MockButtonPin {
+    use super::GpioBootButtonConfig;
+
+    pub type ButtonPin = MockButtonPin;
+
+    impl GpioBootButtonConfig {
+        /// Create default configuration for host testing with simulated pin.
+        pub fn new() -> Self {
+            Self::with_pin(MockButtonPin::new())
+        }
+    }
+
+    impl Default for GpioBootButtonConfig {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// Simulated input pin for host unit tests.
+    #[derive(Debug, Default)]
+    pub struct MockButtonPin {
+        pressed: core::cell::Cell<bool>,
+    }
+
+    impl MockButtonPin {
     pub fn new() -> Self {
         Self {
             pressed: core::cell::Cell::new(false),
@@ -229,6 +244,7 @@ impl MockButtonPin {
             Timer::after(Duration::from_millis(1)).await;
         }
     }
+}
 }
 
 // ============================================================================

@@ -41,6 +41,41 @@ pub const ESP_IMAGE_MAGIC: u8 = 0xE9;
 /// ESP-IDF chip ID for ESP32-C6 (`0x000D` little-endian at offset 12..14).
 pub const ESP32_C6_CHIP_ID: u16 = 0x000D;
 
+/// ESP-IDF chip ID for ESP32-S3 (`0x0009`).
+pub const ESP32_S3_CHIP_ID: u16 = 0x0009;
+
+/// Chip identity and application geometry used to validate and stage an OTA image.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OtaImageProfile {
+    pub chip_id: u16,
+    pub slot_size: usize,
+    pub ota_0_offset: u32,
+    pub ota_1_offset: u32,
+}
+
+impl OtaImageProfile {
+    pub const ESP32_C6: Self = Self {
+        chip_id: ESP32_C6_CHIP_ID,
+        slot_size: MAX_APP_SLOT_SIZE,
+        ota_0_offset: OTA_0_OFFSET,
+        ota_1_offset: OTA_1_OFFSET,
+    };
+
+    pub const ESP32_S3_8MB: Self = Self {
+        chip_id: ESP32_S3_CHIP_ID,
+        slot_size: MAX_APP_SLOT_SIZE,
+        ota_0_offset: OTA_0_OFFSET,
+        ota_1_offset: OTA_1_OFFSET,
+    };
+
+    pub const fn flash_offset(&self, slot: Slot) -> u32 {
+        match slot {
+            Slot::Ota0 => self.ota_0_offset,
+            Slot::Ota1 => self.ota_1_offset,
+        }
+    }
+}
+
 // ============================================================================
 // Public Main Struct & Implementation
 // ============================================================================
@@ -62,6 +97,7 @@ pub struct OtaWriter<F = DefaultTargetFlash> {
     sector_buf: SectorBuffer,
     stream_verifier: Option<StreamVerifier>,
     check_esp_magic: bool,
+    image_profile: OtaImageProfile,
     esp_magic_checked: bool,
     magic_prefix: [u8; 14],
     magic_prefix_len: usize,
@@ -71,6 +107,16 @@ pub struct OtaWriter<F = DefaultTargetFlash> {
 impl<F: OtaTargetFlash> OtaWriter<F> {
     /// Construct a new streaming writer targeting `target_slot` and verified with `public_key`.
     pub fn new(flash: F, target_slot: Slot, public_key: [u8; 32]) -> Self {
+        Self::new_with_profile(flash, target_slot, public_key, OtaImageProfile::ESP32_C6)
+    }
+
+    /// Construct a writer with explicit chip identity and flash partition geometry.
+    pub fn new_with_profile(
+        flash: F,
+        target_slot: Slot,
+        public_key: [u8; 32],
+        image_profile: OtaImageProfile,
+    ) -> Self {
         Self {
             flash,
             target_slot,
@@ -84,6 +130,7 @@ impl<F: OtaTargetFlash> OtaWriter<F> {
             sector_buf: SectorBuffer([0xffu8; SECTOR_SIZE]),
             stream_verifier: None,
             check_esp_magic: true,
+            image_profile,
             esp_magic_checked: false,
             magic_prefix: [0u8; 14],
             magic_prefix_len: 0,
@@ -236,7 +283,7 @@ impl<F: OtaTargetFlash> OtaWriter<F> {
             return Err(OtaError::InvalidSize);
         }
 
-        if (raw_len as usize) > MAX_APP_SLOT_SIZE {
+        if (raw_len as usize) > self.image_profile.slot_size {
             return Err(OtaError::ImageTooLarge);
         }
 
@@ -270,7 +317,10 @@ impl<F: OtaTargetFlash> OtaWriter<F> {
         }
 
         if self.magic_prefix_len >= 14 || self.magic_prefix_len == self.image_len {
-            validate_esp_image_header(&self.magic_prefix[..self.magic_prefix_len])?;
+            validate_esp_image_header_for(
+                &self.magic_prefix[..self.magic_prefix_len],
+                self.image_profile.chip_id,
+            )?;
             self.esp_magic_checked = true;
         }
 
@@ -287,7 +337,8 @@ impl<F: OtaTargetFlash> OtaWriter<F> {
             self.sector_buf.0[self.sector_buf_len..SECTOR_SIZE].fill(0xff);
         }
 
-        let flash_offset = self.target_slot.flash_offset() + self.flashed_bytes as u32;
+        let flash_offset = self.image_profile.flash_offset(self.target_slot)
+            + self.flashed_bytes as u32;
 
         self.flash
             .erase_sector(flash_offset)
@@ -328,6 +379,11 @@ pub fn verify_image_signature(
 /// Verifies that byte 0 is `0xE9` (`ESP_IMAGE_MAGIC`), and if at least 14 bytes
 /// are present, that bytes 12..14 match ESP32-C6 Chip ID `0x000D`.
 pub fn validate_esp_image_header(header: &[u8]) -> Result<(), OtaError> {
+    validate_esp_image_header_for(header, ESP32_C6_CHIP_ID)
+}
+
+/// Validate an ESP-IDF image header against the selected chip ID.
+pub fn validate_esp_image_header_for(header: &[u8], expected_chip_id: u16) -> Result<(), OtaError> {
     if header.is_empty() {
         return Err(OtaError::InvalidImageFormat);
     }
@@ -336,7 +392,7 @@ pub fn validate_esp_image_header(header: &[u8]) -> Result<(), OtaError> {
     }
     if header.len() >= 14 {
         let chip_id = u16::from_le_bytes([header[12], header[13]]);
-        if chip_id != ESP32_C6_CHIP_ID {
+        if chip_id != expected_chip_id {
             return Err(OtaError::InvalidImageFormat);
         }
     }
@@ -499,67 +555,77 @@ impl OtaTargetFlash for MemTargetFlash {
 // Target Hardware Flash Implementation (RISC-V only)
 // ============================================================================
 
-#[cfg(target_arch = "riscv32")]
-pub type DefaultTargetFlash = EspTargetFlash;
+#[cfg(not(target_os = "none"))]
+pub use host::DefaultTargetFlash;
+#[cfg(target_os = "none")]
+pub use target::{DefaultTargetFlash, EspFlashError, EspTargetFlash};
 
-#[cfg(not(target_arch = "riscv32"))]
-pub type DefaultTargetFlash = MemTargetFlash;
+#[cfg(not(target_os = "none"))]
+mod host {
+    use super::MemTargetFlash;
 
-#[cfg(target_arch = "riscv32")]
-pub struct EspTargetFlash;
-
-#[cfg(target_arch = "riscv32")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EspFlashError {
-    Rom(i32),
-    Unaligned,
+    pub type DefaultTargetFlash = MemTargetFlash;
 }
 
-#[cfg(target_arch = "riscv32")]
-impl OtaTargetFlash for EspTargetFlash {
-    type Error = EspFlashError;
+#[cfg(target_os = "none")]
+mod target {
+    use super::{OtaTargetFlash, SECTOR_SIZE};
 
-    fn erase_sector(&mut self, offset: u32) -> Result<(), Self::Error> {
-        if offset % SECTOR_SIZE as u32 != 0 {
-            return Err(EspFlashError::Unaligned);
-        }
-        let sector_num = offset / SECTOR_SIZE as u32;
+    pub type DefaultTargetFlash = EspTargetFlash;
 
-        let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_unlock() };
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            return Err(EspFlashError::Rom(ret));
-        }
+    pub struct EspTargetFlash;
 
-        let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_erase_sector(sector_num) };
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            return Err(EspFlashError::Rom(ret));
-        }
-
-        Ok(())
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EspFlashError {
+        Rom(i32),
+        Unaligned,
     }
 
-    fn write_sector(&mut self, offset: u32, data: &[u8; SECTOR_SIZE]) -> Result<(), Self::Error> {
-        if offset % 4 != 0 {
-            return Err(EspFlashError::Unaligned);
+    impl OtaTargetFlash for EspTargetFlash {
+        type Error = EspFlashError;
+
+        fn erase_sector(&mut self, offset: u32) -> Result<(), Self::Error> {
+            if offset % SECTOR_SIZE as u32 != 0 {
+                return Err(EspFlashError::Unaligned);
+            }
+            let sector_num = offset / SECTOR_SIZE as u32;
+
+            let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_unlock() };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                return Err(EspFlashError::Rom(ret));
+            }
+
+            let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_erase_sector(sector_num) };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                return Err(EspFlashError::Rom(ret));
+            }
+
+            Ok(())
         }
 
-        let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_unlock() };
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            return Err(EspFlashError::Rom(ret));
-        }
+        fn write_sector(&mut self, offset: u32, data: &[u8; SECTOR_SIZE]) -> Result<(), Self::Error> {
+            if offset % 4 != 0 {
+                return Err(EspFlashError::Unaligned);
+            }
 
-        let ret = unsafe {
-            esp_hal::rom::spiflash::esp_rom_spiflash_write(
-                offset,
-                data.as_ptr() as *const u32,
-                SECTOR_SIZE as u32,
-            )
-        };
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            return Err(EspFlashError::Rom(ret));
-        }
+            let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_unlock() };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                return Err(EspFlashError::Rom(ret));
+            }
 
-        Ok(())
+            let ret = unsafe {
+                esp_hal::rom::spiflash::esp_rom_spiflash_write(
+                    offset,
+                    data.as_ptr() as *const u32,
+                    SECTOR_SIZE as u32,
+                )
+            };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                return Err(EspFlashError::Rom(ret));
+            }
+
+            Ok(())
+        }
     }
 }
 
@@ -598,11 +664,15 @@ mod tests {
     }
 
     fn build_test_esp_binary(len: usize) -> Vec<u8> {
+        build_test_esp_binary_for(len, ESP32_C6_CHIP_ID)
+    }
+
+    fn build_test_esp_binary_for(len: usize, chip_id: u16) -> Vec<u8> {
         let mut bin = vec![0xaa; len];
         bin[0] = ESP_IMAGE_MAGIC;
         if len >= 14 {
-            bin[12] = (ESP32_C6_CHIP_ID & 0xff) as u8;
-            bin[13] = ((ESP32_C6_CHIP_ID >> 8) & 0xff) as u8;
+            bin[12] = (chip_id & 0xff) as u8;
+            bin[13] = ((chip_id >> 8) & 0xff) as u8;
         }
         bin
     }
@@ -905,5 +975,59 @@ mod tests {
 
         // Assert
         assert_eq!(res, Err(OtaError::FlashWrite));
+    }
+
+    #[test]
+    fn validates_target_identity_slot_size_and_signature() {
+        let (pubkey, privkey) = generate_test_keys();
+        let s3_profile = OtaImageProfile {
+            chip_id: ESP32_S3_CHIP_ID,
+            slot_size: 4096,
+            ota_0_offset: OTA_0_OFFSET,
+            ota_1_offset: OTA_1_OFFSET,
+        };
+
+        let mut flash = MemTargetFlash::new();
+        let s3_image = build_test_esp_binary_for(1024, ESP32_S3_CHIP_ID);
+        let s3_packet = build_wire_packet(&s3_image, &privkey);
+        let mut writer = OtaWriter::new_with_profile(&mut flash, Slot::Ota0, pubkey, s3_profile);
+        writer.write_chunk(&s3_packet).unwrap();
+        writer.finish().unwrap();
+        assert_eq!(flash.read_bytes(Slot::Ota0.flash_offset(), s3_image.len()), s3_image);
+
+        let mut flash = MemTargetFlash::new();
+        let c6_image = build_test_esp_binary(1024);
+        let c6_packet = build_wire_packet(&c6_image, &privkey);
+        let mut writer = OtaWriter::new(&mut flash, Slot::Ota0, pubkey);
+        writer.write_chunk(&c6_packet).unwrap();
+        writer.finish().unwrap();
+        assert_eq!(flash.read_bytes(Slot::Ota0.flash_offset(), c6_image.len()), c6_image);
+
+        let mut flash = MemTargetFlash::new();
+        let wrong_chip_image = build_test_esp_binary(1024);
+        let wrong_chip_packet = build_wire_packet(&wrong_chip_image, &privkey);
+        let mut writer = OtaWriter::new_with_profile(&mut flash, Slot::Ota0, pubkey, s3_profile);
+        assert_eq!(writer.write_chunk(&wrong_chip_packet), Err(OtaError::InvalidImageFormat));
+        assert!(flash.erased_sectors.is_empty(), "wrong-chip image must not touch flash");
+
+        let mut flash = MemTargetFlash::new();
+        let oversized_image = build_test_esp_binary_for(4097, ESP32_S3_CHIP_ID);
+        let oversized_packet = build_wire_packet(&oversized_image, &privkey);
+        let mut writer = OtaWriter::new_with_profile(&mut flash, Slot::Ota0, pubkey, s3_profile);
+        assert_eq!(writer.write_chunk(&oversized_packet), Err(OtaError::ImageTooLarge));
+        assert!(flash.erased_sectors.is_empty(), "oversized image must not touch flash");
+
+        let mut bad_signature_packet = build_wire_packet(&s3_image, &privkey);
+        bad_signature_packet[8] ^= 1;
+        let mut bad_signature_flash = MemTargetFlash::new();
+        let mut writer = OtaWriter::new_with_profile(
+            &mut bad_signature_flash,
+            Slot::Ota0,
+            pubkey,
+            s3_profile,
+        );
+        writer.write_chunk(&bad_signature_packet).unwrap();
+        assert_eq!(writer.finish(), Err(OtaError::InvalidSignature));
+        assert!(!writer.is_finished());
     }
 }

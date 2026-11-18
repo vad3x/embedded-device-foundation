@@ -3,7 +3,13 @@ name = "edf-gpio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared ESP32-C6 GPIO and flash adapters"
+description = "Shared ESP32 GPIO and flash adapters"
+
+[features]
+default = ["esp32c6"]
+esp32c6 = ["esp-hal/esp32c6"]
+esp32s31 = ["esp-hal/esp32s31"]
+esp32s3 = ["esp-hal/esp32s3"]
 
 [dependencies]
 edf-core = { workspace = true }
@@ -14,8 +20,8 @@ embassy-time = { workspace = true, features = ["generic-queue-8"] }
 embedded-storage = { workspace = true }
 embedded-storage-async = { workspace = true }
 
-[target.'cfg(target_arch = "riscv32")'.dependencies]
-esp-hal = { workspace = true, features = ["log-04", "unstable", "esp32c6"] }
+[target.'cfg(target_os = "none")'.dependencies]
+esp-hal = { workspace = true, features = ["log-04", "unstable"] }
 
 [dev-dependencies]
 futures = { workspace = true }

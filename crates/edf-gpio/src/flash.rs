@@ -8,8 +8,6 @@ use core::ops::Range;
 
 use embedded_storage::nor_flash::{ErrorType, NorFlashError, NorFlashErrorKind};
 use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash, ReadNorFlash};
-#[cfg(target_arch = "riscv32")]
-use log::{debug, warn};
 
 // ============================================================================
 // Public Constants
@@ -31,179 +29,19 @@ pub const WORD_SIZE: usize = 4;
 pub struct EspFlash {
     /// Flash range covered by this driver instance (e.g. `wifi_kvs` or `matter_kvs`).
     range: Range<u32>,
-    #[cfg(not(target_arch = "riscv32"))]
-    mock_data: core::cell::RefCell<alloc::vec::Vec<u8>>,
+    storage: backend::FlashStorage,
 }
 
 impl EspFlash {
     /// Create a new flash driver instance covering the specified absolute flash range.
-    #[cfg(target_arch = "riscv32")]
     pub fn new(range: Range<u32>) -> Self {
-        Self { range }
-    }
-
-    /// Create a new flash driver instance with simulated in-memory storage for host tests.
-    #[cfg(not(target_arch = "riscv32"))]
-    pub fn new(range: Range<u32>) -> Self {
-        let size = (range.end.saturating_sub(range.start)) as usize;
-        Self {
-            range,
-            mock_data: core::cell::RefCell::new(alloc::vec![0xff; size]),
-        }
+        let storage = backend::FlashStorage::new(&range);
+        Self { range, storage }
     }
 
     /// Flash address range covered by this driver.
     pub fn range(&self) -> &Range<u32> {
         &self.range
-    }
-
-    // ========================================================================
-    // Hardware ROM SPI Flash Operations (RISC-V only)
-    // ========================================================================
-
-    #[cfg(target_arch = "riscv32")]
-    fn read_aligned(&self, offset: u32, bytes: &mut [u8]) -> Result<(), EspFlashError> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-
-        if offset < self.range.start
-            || (offset as usize).saturating_add(bytes.len()) > self.range.end as usize
-        {
-            return Err(EspFlashError::OutOfBounds);
-        }
-
-        let aligned_start = offset & !(WORD_SIZE as u32 - 1);
-        let head_skip = (offset - aligned_start) as usize;
-        let total_len = head_skip + bytes.len();
-        let aligned_len = (total_len + WORD_SIZE - 1) & !(WORD_SIZE - 1);
-
-        let mut buf = [0u32; 68]; // 272 bytes buffer (accommodates 256-byte chunks plus alignment padding)
-        if aligned_len > buf.len() * WORD_SIZE {
-            return self.read_chunked(offset, bytes);
-        }
-
-        let ret = unsafe {
-            esp_hal::rom::spiflash::esp_rom_spiflash_read(
-                aligned_start,
-                buf.as_mut_ptr(),
-                aligned_len as u32,
-            )
-        };
-
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            return Err(EspFlashError::RomError(ret));
-        }
-
-        let raw = unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u8, aligned_len) };
-        bytes.copy_from_slice(&raw[head_skip..head_skip + bytes.len()]);
-
-        Ok(())
-    }
-
-    #[cfg(target_arch = "riscv32")]
-    fn read_chunked(&self, offset: u32, bytes: &mut [u8]) -> Result<(), EspFlashError> {
-        const CHUNK: usize = 240;
-        let mut pos = 0;
-        while pos < bytes.len() {
-            let chunk_len = (bytes.len() - pos).min(CHUNK);
-            self.read_aligned(offset + pos as u32, &mut bytes[pos..pos + chunk_len])?;
-            pos += chunk_len;
-        }
-        Ok(())
-    }
-
-    #[cfg(target_arch = "riscv32")]
-    fn write_aligned(&self, offset: u32, bytes: &[u8]) -> Result<(), EspFlashError> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-
-        if !(offset as usize).is_multiple_of(WORD_SIZE) || !bytes.len().is_multiple_of(WORD_SIZE) {
-            return Err(EspFlashError::NotAligned);
-        }
-
-        if offset < self.range.start
-            || (offset as usize).saturating_add(bytes.len()) > self.range.end as usize
-        {
-            return Err(EspFlashError::OutOfBounds);
-        }
-
-        let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_unlock() };
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            warn!("Flash unlock failed: {}", ret);
-            return Err(EspFlashError::RomError(ret));
-        }
-
-        let ret = unsafe {
-            esp_hal::rom::spiflash::esp_rom_spiflash_write(
-                offset,
-                bytes.as_ptr() as *const u32,
-                bytes.len() as u32,
-            )
-        };
-
-        if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
-            warn!("Flash write failed at 0x{:x}: {}", offset, ret);
-            return Err(EspFlashError::RomError(ret));
-        }
-
-        Ok(())
-    }
-
-    // ========================================================================
-    // Host Simulated Flash Operations
-    // ========================================================================
-
-    #[cfg(not(target_arch = "riscv32"))]
-    fn host_read(&self, offset: u32, bytes: &mut [u8]) -> Result<(), EspFlashError> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        if offset < self.range.start
-            || (offset as usize).saturating_add(bytes.len()) > self.range.end as usize
-        {
-            return Err(EspFlashError::OutOfBounds);
-        }
-        let start = (offset - self.range.start) as usize;
-        let end = start + bytes.len();
-        bytes.copy_from_slice(&self.mock_data.borrow()[start..end]);
-        Ok(())
-    }
-
-    #[cfg(not(target_arch = "riscv32"))]
-    fn host_write(&self, offset: u32, bytes: &[u8]) -> Result<(), EspFlashError> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        if !(offset as usize).is_multiple_of(WORD_SIZE) || !bytes.len().is_multiple_of(WORD_SIZE) {
-            return Err(EspFlashError::NotAligned);
-        }
-        if offset < self.range.start
-            || (offset as usize).saturating_add(bytes.len()) > self.range.end as usize
-        {
-            return Err(EspFlashError::OutOfBounds);
-        }
-        let start = (offset - self.range.start) as usize;
-        let mut mock = self.mock_data.borrow_mut();
-        for (i, &b) in bytes.iter().enumerate() {
-            mock[start + i] &= b; // Hardware NOR flash can only clear bits
-        }
-        Ok(())
-    }
-
-    #[cfg(not(target_arch = "riscv32"))]
-    fn host_erase(&self, from: u32, to: u32) -> Result<(), EspFlashError> {
-        if !from.is_multiple_of(SECTOR_SIZE as u32) || !to.is_multiple_of(SECTOR_SIZE as u32) {
-            return Err(EspFlashError::NotAligned);
-        }
-        if from < self.range.start || from > to || to > self.range.end {
-            return Err(EspFlashError::OutOfBounds);
-        }
-        let start = (from - self.range.start) as usize;
-        let end = (to - self.range.start) as usize;
-        self.mock_data.borrow_mut()[start..end].fill(0xff);
-        Ok(())
     }
 }
 
@@ -236,14 +74,7 @@ impl ReadNorFlash for EspFlash {
     const READ_SIZE: usize = 1;
 
     async fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
-        #[cfg(target_arch = "riscv32")]
-        {
-            self.read_aligned(offset, bytes)
-        }
-        #[cfg(not(target_arch = "riscv32"))]
-        {
-            self.host_read(offset, bytes)
-        }
+        self.storage.read(&self.range, offset, bytes)
     }
 
     fn capacity(&self) -> usize {
@@ -256,12 +87,123 @@ impl NorFlash for EspFlash {
     const ERASE_SIZE: usize = SECTOR_SIZE;
 
     async fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
-        #[cfg(target_arch = "riscv32")]
-        {
+        self.storage.erase(&self.range, from, to)
+    }
+
+    async fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.storage.write(&self.range, offset, bytes)
+    }
+}
+
+impl MultiwriteNorFlash for EspFlash {}
+
+#[cfg(target_os = "none")]
+mod backend {
+    use core::ops::Range;
+
+    use log::{debug, warn};
+
+    use super::{EspFlashError, SECTOR_SIZE, WORD_SIZE};
+
+    pub struct FlashStorage;
+
+    impl FlashStorage {
+        pub fn new(_range: &Range<u32>) -> Self {
+            Self
+        }
+
+        pub fn read(&self, range: &Range<u32>, offset: u32, bytes: &mut [u8]) -> Result<(), EspFlashError> {
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            if offset < range.start
+                || (offset as usize).saturating_add(bytes.len()) > range.end as usize
+            {
+                return Err(EspFlashError::OutOfBounds);
+            }
+
+            let aligned_start = offset & !(WORD_SIZE as u32 - 1);
+            let head_skip = (offset - aligned_start) as usize;
+            let total_len = head_skip + bytes.len();
+            let aligned_len = (total_len + WORD_SIZE - 1) & !(WORD_SIZE - 1);
+
+            let mut buf = [0u32; 68];
+            if aligned_len > buf.len() * WORD_SIZE {
+                return self.read_chunked(range, offset, bytes);
+            }
+
+            let ret = unsafe {
+                esp_hal::rom::spiflash::esp_rom_spiflash_read(
+                    aligned_start,
+                    buf.as_mut_ptr(),
+                    aligned_len as u32,
+                )
+            };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                return Err(EspFlashError::RomError(ret));
+            }
+
+            let raw =
+                unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u8, aligned_len) };
+            bytes.copy_from_slice(&raw[head_skip..head_skip + bytes.len()]);
+            Ok(())
+        }
+
+        fn read_chunked(
+            &self,
+            range: &Range<u32>,
+            offset: u32,
+            bytes: &mut [u8],
+        ) -> Result<(), EspFlashError> {
+            const CHUNK: usize = 240;
+            let mut pos = 0;
+            while pos < bytes.len() {
+                let chunk_len = (bytes.len() - pos).min(CHUNK);
+                self.read(range, offset + pos as u32, &mut bytes[pos..pos + chunk_len])?;
+                pos += chunk_len;
+            }
+            Ok(())
+        }
+
+        pub fn write(&self, range: &Range<u32>, offset: u32, bytes: &[u8]) -> Result<(), EspFlashError> {
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            if !(offset as usize).is_multiple_of(WORD_SIZE) || !bytes.len().is_multiple_of(WORD_SIZE)
+            {
+                return Err(EspFlashError::NotAligned);
+            }
+            if offset < range.start
+                || (offset as usize).saturating_add(bytes.len()) > range.end as usize
+            {
+                return Err(EspFlashError::OutOfBounds);
+            }
+
+            let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_unlock() };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                warn!("Flash unlock failed: {}", ret);
+                return Err(EspFlashError::RomError(ret));
+            }
+
+            let ret = unsafe {
+                esp_hal::rom::spiflash::esp_rom_spiflash_write(
+                    offset,
+                    bytes.as_ptr() as *const u32,
+                    bytes.len() as u32,
+                )
+            };
+            if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
+                warn!("Flash write failed at 0x{:x}: {}", offset, ret);
+                return Err(EspFlashError::RomError(ret));
+            }
+            Ok(())
+        }
+
+        pub fn erase(&self, range: &Range<u32>, from: u32, to: u32) -> Result<(), EspFlashError> {
             if !from.is_multiple_of(SECTOR_SIZE as u32) || !to.is_multiple_of(SECTOR_SIZE as u32) {
                 return Err(EspFlashError::NotAligned);
             }
-            if from < self.range.start || from > to || to > self.range.end {
+            if from < range.start || from > to || to > range.end {
                 return Err(EspFlashError::OutOfBounds);
             }
 
@@ -275,37 +217,87 @@ impl NorFlash for EspFlash {
             while addr < to {
                 let sector = addr / SECTOR_SIZE as u32;
                 debug!("Erasing flash sector {} (0x{:x})", sector, addr);
-
                 let ret = unsafe { esp_hal::rom::spiflash::esp_rom_spiflash_erase_sector(sector) };
                 if ret != esp_hal::rom::spiflash::ESP_ROM_SPIFLASH_RESULT_OK {
                     warn!("Flash erase sector {} failed: {}", sector, ret);
                     return Err(EspFlashError::RomError(ret));
                 }
-
                 addr += SECTOR_SIZE as u32;
             }
-
             Ok(())
-        }
-        #[cfg(not(target_arch = "riscv32"))]
-        {
-            self.host_erase(from, to)
-        }
-    }
-
-    async fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-        #[cfg(target_arch = "riscv32")]
-        {
-            self.write_aligned(offset, bytes)
-        }
-        #[cfg(not(target_arch = "riscv32"))]
-        {
-            self.host_write(offset, bytes)
         }
     }
 }
 
-impl MultiwriteNorFlash for EspFlash {}
+#[cfg(not(target_os = "none"))]
+mod backend {
+    use core::cell::RefCell;
+    use core::ops::Range;
+
+    use super::{EspFlashError, SECTOR_SIZE, WORD_SIZE};
+
+    pub struct FlashStorage {
+        mock_data: RefCell<alloc::vec::Vec<u8>>,
+    }
+
+    impl FlashStorage {
+        pub fn new(range: &Range<u32>) -> Self {
+            let size = (range.end.saturating_sub(range.start)) as usize;
+            Self {
+                mock_data: RefCell::new(alloc::vec![0xff; size]),
+            }
+        }
+
+        pub fn read(&self, range: &Range<u32>, offset: u32, bytes: &mut [u8]) -> Result<(), EspFlashError> {
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            if offset < range.start
+                || (offset as usize).saturating_add(bytes.len()) > range.end as usize
+            {
+                return Err(EspFlashError::OutOfBounds);
+            }
+            let start = (offset - range.start) as usize;
+            let end = start + bytes.len();
+            bytes.copy_from_slice(&self.mock_data.borrow()[start..end]);
+            Ok(())
+        }
+
+        pub fn write(&self, range: &Range<u32>, offset: u32, bytes: &[u8]) -> Result<(), EspFlashError> {
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            if !(offset as usize).is_multiple_of(WORD_SIZE) || !bytes.len().is_multiple_of(WORD_SIZE)
+            {
+                return Err(EspFlashError::NotAligned);
+            }
+            if offset < range.start
+                || (offset as usize).saturating_add(bytes.len()) > range.end as usize
+            {
+                return Err(EspFlashError::OutOfBounds);
+            }
+            let start = (offset - range.start) as usize;
+            let mut mock = self.mock_data.borrow_mut();
+            for (i, &b) in bytes.iter().enumerate() {
+                mock[start + i] &= b; // Hardware NOR flash can only clear bits
+            }
+            Ok(())
+        }
+
+        pub fn erase(&self, range: &Range<u32>, from: u32, to: u32) -> Result<(), EspFlashError> {
+            if !from.is_multiple_of(SECTOR_SIZE as u32) || !to.is_multiple_of(SECTOR_SIZE as u32) {
+                return Err(EspFlashError::NotAligned);
+            }
+            if from < range.start || from > to || to > range.end {
+                return Err(EspFlashError::OutOfBounds);
+            }
+            let start = (from - range.start) as usize;
+            let end = (to - range.start) as usize;
+            self.mock_data.borrow_mut()[start..end].fill(0xff);
+            Ok(())
+        }
+    }
+}
 
 // ============================================================================
 // Unit Tests
